@@ -1,0 +1,164 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// Status koneksi WhatsApp (singleton)
+model WaSession {
+  id          String    @id @default("main")
+  status      String    @default("disconnected") // disconnected | connecting | waiting_scan | connected
+  qrCode      String? // data URL QR terbaru (transient)
+  qrAt        DateTime?
+  ownerJid    String?
+  ownerName   String?
+  ownerNumber String?
+  connectedAt DateTime?
+  updatedAt   DateTime  @updatedAt
+}
+
+// Kontak / percakapan WhatsApp
+model Contact {
+  id                String    @id @default(cuid())
+  jid               String    @unique // 62812xxxx@s.whatsapp.net atau xxx@g.us
+  name              String?
+  number            String
+  isGroup           Boolean   @default(false)
+  aiEnabled         Boolean   @default(true)
+  aiPausedUntil     DateTime? // null = AI aktif normal; masa depan = AI dijeda (pemilik mengambil alih manual)
+  aiSummary         String? // JSON ringkasan percakapan dari AI (konteks cepat utk pemilik saat ambil alih)
+  aiSummaryAt       DateTime? // kapan ringkasan AI terakhir dibuat
+  leadStatus        String    @default("none") // none | baru | potensial | hot | selesai (deteksi minat jadi order)
+  leadManual        Boolean   @default(false) // true = status diatur manual pemilik, deteksi otomatis dilewati
+  notes             String?
+  unread            Int       @default(0)
+  lastMessageAt     DateTime?
+  lastMessageText   String?
+  lastMessageFromMe Boolean   @default(false)
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+  messages          Message[]
+
+  @@index([lastMessageAt])
+}
+
+// Pesan WhatsApp
+model Message {
+  id        String   @id @default(cuid())
+  contactId String
+  contact   Contact  @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  jid       String
+  waMsgId   String? // id pesan WhatsApp untuk dedupe
+  fromMe    Boolean
+  body      String   @default("")
+  msgType   String   @default("text") // text | image | audio | sticker | document | location | contact | unknown
+  source    String   @default("client") // client | ai | manual | owner
+  status    String   @default("received") // received | sent | failed
+  errorInfo String?
+  createdAt DateTime @default(now())
+
+  @@unique([contactId, waMsgId])
+  @@index([contactId, createdAt])
+  @@index([createdAt])
+  @@index([source, createdAt])
+}
+
+// Pengaturan asisten AI (singleton)
+model AiSetting {
+  id                String   @id @default("main")
+  businessName      String   @default("Mukundo Teknologi Indonesia")
+  ownerName         String   @default("Admin Mukundo")
+  assistantName     String   @default("Rani")
+  persona           String   @default("")
+  autoReplyEnabled  Boolean  @default(true)
+  replyDelayMin     Int      @default(2) // detik
+  replyDelayMax     Int      @default(6) // detik
+  workHoursStart    String   @default("00:00")
+  workHoursEnd      String   @default("23:59")
+  outsideHoursReply Boolean  @default(true)
+  awayMessage       String   @default("")
+  greetingMessage   String   @default("Halo Kak! Terima kasih sudah menghubungi Mukundo Teknologi 😊 Ada yang bisa kami bantu terkait AC atau listrik?")
+  contextMessages   Int      @default(16)
+  typingIndicator   Boolean  @default(true)
+  transcribeVoice   Boolean  @default(true) // transkrip pesan suara klien via ASR
+  visionImages      Boolean  @default(true) // AI memahami foto yang dikirim klien via VLM
+  visionDocuments  Boolean  @default(true) // AI membaca dokumen PDF klien (penawaran/nota) via VLM
+  leadDetection     Boolean  @default(true) // deteksi otomatis lead (potensi order) dari isi chat
+  handoverEnabled   Boolean  @default(true) // jeda AI utk kontak saat pemilik membalas manual (ambil alih)
+  handoverMinutes   Int      @default(30) // durasi jeda AI setelah pemilik membalas manual (menit)
+  pinHash           String? // SHA-256 hex PIN kunci dashboard (4-8 digit), null = belum diset
+  pinEnabled        Boolean  @default(false) // true = dashboard & API sensitif terkunci sampai PIN dibuka
+  updatedAt         DateTime @updatedAt
+}
+
+// Basis pengetahuan AI (layanan, harga, FAQ, info)
+model KnowledgeItem {
+  id        String   @id @default(cuid())
+  category  String   @default("layanan") // layanan | harga | faq | info | lainnya
+  title     String
+  content   String
+  keywords  String?
+  active    Boolean  @default(true)
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([category])
+}
+
+// Template balasan cepat untuk balasan manual pemilik
+model QuickReply {
+  id        String   @id @default(cuid())
+  shortcut  String   @unique // kata kunci singkat, mis. "harga"
+  title     String
+  content   String
+  category  String   @default("umum") // umum | layanan | jadwal | penawaran | lainnya
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([category])
+}
+
+// Broadcast promo terjadwal ke daftar kontak
+model Broadcast {
+  id          String    @id @default(cuid())
+  name        String
+  message     String
+  status      String    @default("draft") // draft | terjadwal | mengirim | terkirim | dibatalkan
+  audience    String    @default("all") // all | ai | baru | potensial | hot | selesai
+  recipients  String    @default("[]") // JSON snapshot [{jid, name}] saat dibuat
+  totalCount  Int       @default(0)
+  sentCount   Int       @default(0)
+  failedCount Int       @default(0)
+  scheduledAt DateTime?
+  sentAt      DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([status])
+}
+
+// Jadwal jam operasional per hari (0=Minggu .. 6=Sabtu) — sumber kebenaran jam kerja AI
+model BusinessHour {
+  id          String  @id @default(cuid())
+  dayOfWeek   Int     @unique // 0=Minggu, 1=Senin, 2=Selasa, 3=Rabu, 4=Kamis, 5=Jumat, 6=Sabtu
+  isOpen      Boolean @default(true)
+  openMinute  Int     @default(0) // menit dari tengah malam, mis. 480 = 08:00
+  closeMinute Int     @default(1439) // 1439 = 23:59
+}
+
+// Log aktivitas sistem
+model ActivityLog {
+  id        String   @id @default(cuid())
+  type      String // connection | ai_reply | message | error | settings | knowledge | simulate
+  level     String   @default("info") // info | success | warn | error
+  message   String
+  meta      String?
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([type])
+}
